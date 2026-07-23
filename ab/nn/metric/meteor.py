@@ -21,61 +21,35 @@ def _resource_exists(*paths):
 
 def _safe_download_nltk() -> None:
     """
-    Safely download NLTK resources using a cross-process file lock.
-    This ensures that multiple workers/GPUs don't corrupt the download
-    by downloading simultaneously, while keeping backward compatibility
-    for legacy scripts that depend on automatic downloads.
+    Safely download NLTK resources.
+    This ensures that resources are available for METEOR computation.
     """
-    from filelock import FileLock, Timeout
-    from pathlib import Path
-
     # Fast path: check if resources already exist
     if _resource_exists("corpora/wordnet", "corpora/wordnet.zip") and \
        _resource_exists("corpora/omw-1.4", "corpora/omw-1.4.zip"):
         return
 
-    # Slow path: use a lock to download safely
-    import tempfile
-    lock_dir = Path(tempfile.gettempdir()) / "nltk-download-locks"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    lock_path = lock_dir / "meteor_nltk.lock"
+    # Slow path: download resources
+    if not _resource_exists("corpora/wordnet", "corpora/wordnet.zip"):
+        success = nltk.download('wordnet', quiet=True)
+        if not success:
+            raise RuntimeError("Failed to download NLTK resource: wordnet")
 
-    try:
-        with FileLock(str(lock_path), timeout=600):
-            # Double check inside the lock
-            if not _resource_exists("corpora/wordnet", "corpora/wordnet.zip"):
-                success = nltk.download('wordnet', quiet=True)
-                if not success:
-                    raise RuntimeError("Failed to download NLTK resource: wordnet")
-
-            if not _resource_exists("corpora/omw-1.4", "corpora/omw-1.4.zip"):
-                success = nltk.download('omw-1.4', quiet=True)
-                if not success:
-                    raise RuntimeError("Failed to download NLTK resource: omw-1.4")
-    except Timeout:
-        if not (
-            _resource_exists("corpora/wordnet", "corpora/wordnet.zip")
-            and _resource_exists("corpora/omw-1.4", "corpora/omw-1.4.zip")
-        ):
-            print(
-                "[MeteorMetric WARN] Timed out waiting for NLTK download lock "
-                "and required resources are still unavailable. "
-                "METEOR scores may be skipped or reported as 0."
-            )
+    if not _resource_exists("corpora/omw-1.4", "corpora/omw-1.4.zip"):
+        success = nltk.download('omw-1.4', quiet=True)
+        if not success:
+            raise RuntimeError("Failed to download NLTK resource: omw-1.4")
 
 
 def _tokenize_text(text: str) -> list[str]:
     """
     Tokenize and normalize English caption text.
-
-    Falls back to whitespace tokenization if NLTK punkt resources are missing.
     """
     text = str(text).lower().strip()
-
     try:
         from nltk.tokenize import word_tokenize
         words = word_tokenize(text)
-    except LookupError:
+    except Exception:
         words = text.split()
 
     cleaned_words = [
@@ -119,23 +93,19 @@ class MeteorMetric:
         if self.vocab_size == 50257:
             try:
                 from transformers import GPT2TokenizerFast
+                from ab.nn.util.hf.download_utils import ensure_hf_model
 
-                tokenizer_dir = os.path.join(
-                    os.path.dirname(__file__),
-                    "../transform/gpt2_tokenizer",
-                )
+                tokenizer_path = ensure_hf_model("gpt2")
 
                 self.gpt2_tokenizer = GPT2TokenizerFast.from_pretrained(
-                    tokenizer_dir,
+                    tokenizer_path,
                     local_files_only=True,
                 )
 
             except (ImportError, OSError) as error:
-                print(
-                    "[MeteorMetric WARN] Local GPT-2 tokenizer could not be "
-                    f"loaded. Falling back to GLOBAL_CAPTION_VOCAB. Error: {error}"
-                )
-                self.gpt2_tokenizer = None
+                raise RuntimeError(
+                    f"GPT-2 tokenizer is required for vocab size 50257 but could not be loaded: {error}"
+                ) from error
 
         self.reset()
 
@@ -198,9 +168,6 @@ class MeteorMetric:
         return words
 
     def _decode_gpt2_ids(self, token_ids: list[int]) -> list[str]:
-        if self.gpt2_tokenizer is None:
-            return self._decode_legacy_ids(token_ids)
-
         clean_ids = []
 
         for token_id in token_ids:

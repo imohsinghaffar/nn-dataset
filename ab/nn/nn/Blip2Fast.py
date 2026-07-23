@@ -24,7 +24,6 @@ LLM Markers (for nn-gpt / Delta LLM pipeline):
 import torch
 import torch.nn as nn
 from transformers import (
-    Blip2Processor,
     Blip2Model,
     GPT2LMHeadModel,
     GPT2Config,
@@ -33,8 +32,9 @@ from transformers import (
 import os
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+from ab.nn.util.hf.download_utils import ensure_hf_model
 
-from ab.nn.util.hf.HF import from_pretrained_with_retry
+
 
 
 def supported_hyperparameters():
@@ -54,14 +54,17 @@ class FrozenBlip2Encoder(nn.Module):
         model_id = "Salesforce/blip2-opt-2.7b"
         print(f"[Blip2Fast] Loading frozen vision encoder from: {model_id}")
 
+        # [AUTO-DOWNLOAD] Ensure the model is in the local HF cache (robust
+        # snapshot_download, avoids the from_pretrained download crash).
+        ensure_hf_model(model_id)
+
         # Load only the vision + Q-Former part (not the full OPT decoder)
         # [FROZEN] Load backbone in float16 to save 7.6GB of VRAM (3.8B params).
         # This is essential for fitting the model + activations in 24GB.
         # Frozen weights do not need float32 precision for inference-only use.
-        self.blip2 = from_pretrained_with_retry(
-            Blip2Model.from_pretrained,
-            model_id,
-            torch_dtype=torch.float16,
+        self.blip2 = Blip2Model.from_pretrained(
+            "Salesforce/blip2-opt-2.7b", local_files_only=True,
+            dtype=torch.float16,
             low_cpu_mem_usage=True,
             device_map={"": device}
         )
@@ -92,7 +95,14 @@ class FrozenBlip2Encoder(nn.Module):
         self.blip2.eval()
         with torch.no_grad():
             outputs = self.blip2.get_qformer_features(pixel_values=pixel_values)
-        return outputs.last_hidden_state  # (B, 32, 768)
+            
+        # Safely handle different Transformers versions (Object vs Tensor return types)
+        if hasattr(outputs, 'last_hidden_state'):
+            return outputs.last_hidden_state  # (B, 32, 768)
+        elif isinstance(outputs, tuple):
+            return outputs[0]
+        else:
+            return outputs
 
 
 # ============================================================
@@ -112,13 +122,17 @@ class CaptionDecoder(nn.Module):
 
         # [TRAINABLE] Load GPT2-small (124M params vs OPT's 2.7B = ~20x faster)
         gpt2_id = "gpt2"
-        import os
-        _tok_dir = os.path.join(os.path.dirname(__file__), "../transform/gpt2_tokenizer")
-        self.tokenizer = GPT2Tokenizer.from_pretrained(_tok_dir, local_files_only=True)
+
+        # [AUTO-DOWNLOAD] Ensure GPT2 (model + tokenizer) is in the local HF cache.
+        ensure_hf_model(gpt2_id)
+
+        # [UNIFIED] Load GPT2 tokenizer from the same HF cache as the model
+        # (populated above) instead of a separate local folder. One source of truth.
+        self.tokenizer = GPT2Tokenizer.from_pretrained(gpt2_id, local_files_only=True)
         self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        config = from_pretrained_with_retry(GPT2Config.from_pretrained, gpt2_id)
-        self.gpt2 = from_pretrained_with_retry(GPT2LMHeadModel.from_pretrained, gpt2_id, config=config)
+        config = GPT2Config.from_pretrained(gpt2_id, local_files_only=True)
+        self.gpt2 = GPT2LMHeadModel.from_pretrained(gpt2_id, config=config, local_files_only=True)
         self.gpt2 = self.gpt2.to(device)
         self.gpt2_hidden = config.n_embd  # 768
 

@@ -2,6 +2,21 @@ import re
 import torch
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 
+def _tokenize_text(text):
+    try:
+        from nltk.tokenize import word_tokenize
+        words = word_tokenize(text.lower())
+    except Exception:
+        words = text.lower().split()
+
+    tokens = []
+    for word in words:
+        cleaned = re.sub(r"[^a-z0-9]", "", word)
+        if cleaned:
+            tokens.append(cleaned)
+
+    return tokens
+
 class BLEUMetric:
     def __init__(self, out_shape=None):
         self.smooth = SmoothingFunction().method1
@@ -9,11 +24,13 @@ class BLEUMetric:
         if self.vocab_size == 50257:
             try:
                 from transformers import GPT2TokenizerFast
-                import os
-                _tok_dir = os.path.join(os.path.dirname(__file__), "../transform/gpt2_tokenizer")
-                self.gpt2_tokenizer = GPT2TokenizerFast.from_pretrained(_tok_dir, local_files_only=True)
-            except ImportError:
-                self.gpt2_tokenizer = None
+                from ab.nn.util.hf.download_utils import ensure_hf_model
+                tokenizer_path = ensure_hf_model("gpt2")
+                self.gpt2_tokenizer = GPT2TokenizerFast.from_pretrained(tokenizer_path, local_files_only=True)
+            except (ImportError, OSError) as error:
+                raise RuntimeError(
+                    f"GPT-2 tokenizer is required for vocab size 50257 but could not be loaded: {error}"
+                ) from error
         else:
             self.gpt2_tokenizer = None
         self.reset()
@@ -27,35 +44,35 @@ class BLEUMetric:
         self.scores4 = []  # BLEU-4
 
     def __call__(self, preds, labels):
-        if isinstance(preds, list) and isinstance(preds[0], str):
+        if isinstance(preds, list) and preds and isinstance(preds[0], str):
             if labels.dim() == 3:
                 targets = labels.cpu().tolist()
             else:
                 targets = [[t] for t in labels.cpu().tolist()]
             
-            from ab.nn.loader.coco_.Caption import GLOBAL_CAPTION_VOCAB
-            idx2word = GLOBAL_CAPTION_VOCAB.get('idx2word', {})
-            
             for hyp_text, refs in zip(preds, targets):
-                try:
-                    from nltk.tokenize import word_tokenize
-                    hyp = [re.sub(r'[^a-z0-9]', '', w) for w in word_tokenize(hyp_text.lower())]
-                except Exception:
-                    import re
-                    hyp = [re.sub(r'[^a-z0-9]', '', w) for w in hyp_text.lower().split()]
-                hyp = [w for w in hyp if w]
-                
+                hyp = _tokenize_text(hyp_text)
+
                 filtered_refs = []
                 for r in refs:
-                    r_clean = [idx2word.get(x, "") for x in r if x != 0]
-                    r_clean = [w.lower() for w in r_clean if w and w not in ('<EOS>', '<SOS>', '<PAD>', '<UNK>', '<|endoftext|>')]
+                    if self.vocab_size == 50257 and self.gpt2_tokenizer:
+                        # GPT-2 mode: labels are GPT-2 token IDs — decode with gpt2_tokenizer
+                        clean_ids = [x for x in r if x >= 0 and x != -100]
+                        ref_text = self.gpt2_tokenizer.decode(clean_ids, skip_special_tokens=True)
+                        r_clean = _tokenize_text(ref_text)
+                    else:
+                        # Legacy COCO vocab mode
+                        from ab.nn.loader.coco_.Caption import GLOBAL_CAPTION_VOCAB
+                        idx2word = GLOBAL_CAPTION_VOCAB.get('idx2word', {})
+                        r_clean = [idx2word.get(x, "") for x in r if x != 0]
+                        r_clean = [w.lower() for w in r_clean if w and w not in ('<EOS>', '<SOS>', '<PAD>', '<UNK>', '<|endoftext|>')]
                     if len(r_clean) > 0:
                         filtered_refs.append(r_clean)
                 if not filtered_refs:
                     continue
                 self.scores1.append(sentence_bleu(filtered_refs, hyp, weights=(1, 0, 0, 0), smoothing_function=self.smooth))
                 self.scores2.append(sentence_bleu(filtered_refs, hyp, weights=(0.5, 0.5, 0, 0), smoothing_function=self.smooth))
-                self.scores3.append(sentence_bleu(filtered_refs, hyp, weights=(0.33, 0.33, 0.33, 0), smoothing_function=self.smooth))
+                self.scores3.append(sentence_bleu(filtered_refs, hyp, weights=(1/3, 1/3, 1/3, 0), smoothing_function=self.smooth))
                 self.scores4.append(sentence_bleu(filtered_refs, hyp, weights=(0.25, 0.25, 0.25, 0.25), smoothing_function=self.smooth))
             return
 
@@ -76,13 +93,14 @@ class BLEUMetric:
                 # NEW LOGIC: Text-based Decoding (GPT-2/OPT)
                 p_clean = [x for x in p if x != -100 and x >= 0]
                 hyp_text = self.gpt2_tokenizer.decode(p_clean, skip_special_tokens=True)
-                hyp = hyp_text.lower().split()
+                hyp = _tokenize_text(hyp_text)
                 filtered_refs = []
                 for r in refs:
                     r_clean = [x for x in r if x != -100 and x >= 0]
                     ref_text = self.gpt2_tokenizer.decode(r_clean, skip_special_tokens=True)
-                    if ref_text.strip():
-                        filtered_refs.append(ref_text.lower().split())
+                    ref_tokens = _tokenize_text(ref_text)
+                    if ref_tokens:
+                        filtered_refs.append(ref_tokens)
             else:
                 # LEGACY LOGIC: Integer ID-based Lookup
                 hyp = [w for w in p if w != 0]
@@ -94,7 +112,7 @@ class BLEUMetric:
                 continue
             self.scores1.append(sentence_bleu(filtered_refs, hyp, weights=(1, 0, 0, 0), smoothing_function=self.smooth))
             self.scores2.append(sentence_bleu(filtered_refs, hyp, weights=(0.5, 0.5, 0, 0), smoothing_function=self.smooth))
-            self.scores3.append(sentence_bleu(filtered_refs, hyp, weights=(0.33, 0.33, 0.33, 0), smoothing_function=self.smooth))
+            self.scores3.append(sentence_bleu(filtered_refs, hyp, weights=(1/3, 1/3, 1/3, 0), smoothing_function=self.smooth))
             self.scores4.append(sentence_bleu(filtered_refs, hyp, weights=(0.25, 0.25, 0.25, 0.25), smoothing_function=self.smooth))
 
     def result(self):

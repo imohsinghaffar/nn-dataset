@@ -12,6 +12,7 @@ import re
 import torch
 import torch.nn as nn
 from transformers import GitProcessor, GitForCausalLM
+from ab.nn.util.hf.download_utils import ensure_hf_model
 import os
 
 # Suppress HuggingFace Tokenizers fork warnings
@@ -32,9 +33,12 @@ class Net(nn.Module):
         model_id = "microsoft/git-large-coco"
         print(f"Loading GIT Model: {model_id}")
 
-        from ab.nn.util.hf.HF import from_pretrained_with_retry
-        self.processor = from_pretrained_with_retry(GitProcessor.from_pretrained, model_id, use_fast=False)
-        self.model = from_pretrained_with_retry(GitForCausalLM.from_pretrained, model_id).to(device)
+        # [AUTO-DOWNLOAD] Ensure the model is in the local HF cache (robust
+        # snapshot_download, avoids the from_pretrained download crash).
+        ensure_hf_model(model_id)
+
+        self.processor = GitProcessor.from_pretrained(model_id, use_fast=False, local_files_only=True)
+        self.model = GitForCausalLM.from_pretrained(model_id, local_files_only=True).to(device)
 
         for p in self.model.parameters():
             p.requires_grad = False

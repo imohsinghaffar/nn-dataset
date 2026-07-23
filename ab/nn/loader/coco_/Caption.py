@@ -25,7 +25,10 @@ MINIMUM_ACCURACY = 0.001
 class COCOCaptionDataset(Dataset):
     def __init__(self, transform, root, split='train', word2idx=None, idx2word=None):
         super().__init__()
-        nltk.download('punkt_tab')
+        try:
+            nltk.data.find("tokenizers/punkt_tab")
+        except LookupError:
+            nltk.download("punkt_tab", quiet=True)
         valid_splits = ['train', 'val']
         if split not in valid_splits:
             raise ValueError(f"Invalid split: {split}. Must be 'train' or 'val'.")
@@ -191,7 +194,6 @@ def loader(transform_fn, task):
     train_dataset = COCOCaptionDataset(transform=transform, root=path, split='train')
     val_dataset = COCOCaptionDataset(transform=transform, root=path, split='val')
     # Reduce and Randomize validation set size for fast debugging
-
     import random
     val_ids = list(sorted(val_dataset.ids))
     random.shuffle(val_ids)

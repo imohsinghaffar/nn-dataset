@@ -21,7 +21,8 @@ import os
 import random
 import torch
 import torch.nn as nn
-from transformers import AutoTokenizer, OPTForCausalLM, GPT2Tokenizer
+from transformers import AutoTokenizer, AutoModelForCausalLM, GPT2Tokenizer
+from ab.nn.util.hf.download_utils import ensure_hf_model
 
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -108,20 +109,21 @@ class OPTCaptionDecoder(nn.Module):
 
         print(f"[Blip2FastOpt] Loading frozen OPT decoder: {OPT_MODEL_ID}")
 
-        from ab.nn.util.hf.HF import from_pretrained_with_retry
+        # [AUTO-DOWNLOAD] Ensure OPT + GPT2 are in the local HF cache.
+        ensure_hf_model(OPT_MODEL_ID)
+        ensure_hf_model("gpt2")
 
-        self.opt_tokenizer = from_pretrained_with_retry(AutoTokenizer.from_pretrained, OPT_MODEL_ID, use_fast=False)
+        self.opt_tokenizer = AutoTokenizer.from_pretrained(OPT_MODEL_ID, use_fast=False, local_files_only=True)
         if self.opt_tokenizer.pad_token is None:
             self.opt_tokenizer.pad_token = self.opt_tokenizer.eos_token
 
-        _tok_dir = os.path.join(os.path.dirname(__file__), "../transform/gpt2_tokenizer")
-        self.gpt2_tokenizer = GPT2Tokenizer.from_pretrained(_tok_dir, local_files_only=True)
+        # [UNIFIED] Load GPT2 tokenizer from the same HF cache as the model.
+        self.gpt2_tokenizer = GPT2Tokenizer.from_pretrained("gpt2", local_files_only=True)
         self.gpt2_tokenizer.pad_token = self.gpt2_tokenizer.eos_token
 
-        self.opt = from_pretrained_with_retry(
-            OPTForCausalLM.from_pretrained,
-            OPT_MODEL_ID,
-            torch_dtype=torch.float16,
+        self.opt = AutoModelForCausalLM.from_pretrained(
+            OPT_MODEL_ID, local_files_only=True,
+            dtype=torch.float16,
             device_map={"": device},
         )
 
@@ -186,11 +188,10 @@ class OPTCaptionDecoder(nn.Module):
             from transformers import Blip2ForConditionalGeneration
             import gc
 
-            from ab.nn.util.hf.HF import from_pretrained_with_retry
-            temp_model = from_pretrained_with_retry(
-                Blip2ForConditionalGeneration.from_pretrained,
-                "Salesforce/blip2-opt-2.7b",
-                torch_dtype=torch.float16,
+            ensure_hf_model("Salesforce/blip2-opt-2.7b")
+            temp_model = Blip2ForConditionalGeneration.from_pretrained(
+                "Salesforce/blip2-opt-2.7b", local_files_only=True,
+                dtype=torch.float16,
                 low_cpu_mem_usage=True,
                 device_map="cpu",
             )

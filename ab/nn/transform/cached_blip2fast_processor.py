@@ -16,13 +16,16 @@ Important rules enforced:
 import os
 import torch
 from torch.utils.data import Dataset
+from ab.nn.util.hf.download_utils import ensure_hf_model
 
 def _get_default_cache_dir():
-    if "BLIP2_CACHE_DIR" in os.environ:
-        return os.environ["BLIP2_CACHE_DIR"]
-    legacy_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../nn-gpt/out/nngpt/cache"))
-    if os.path.exists(legacy_path):
-        return legacy_path
+    # Allow overriding via environment variable (useful for clusters/shared storage)
+    env_cache = os.environ.get("BLIP2_CACHE_DIR")
+    if env_cache and os.path.exists(env_cache):
+        return os.path.abspath(env_cache)
+
+    # Standard cache location: out/cache inside the project root.
+    # If empty/missing, auto-extraction will populate it automatically.
     base_dir = os.path.dirname(__file__)
     return os.path.abspath(os.path.join(base_dir, "../../../out/cache"))
 
@@ -41,13 +44,14 @@ def _auto_extract_features(split: str):
     os.makedirs(cache_dir, exist_ok=True)
     device = "cuda" if torch.cuda.is_available() else "cpu"
     
-    from ab.nn.util.hf.HF import from_pretrained_with_retry
+
     print("[CACHE-AUTO] Loading BLIP-2 Encoder in 4-bit...")
-    model = from_pretrained_with_retry(
-        Blip2Model.from_pretrained,
-        "Salesforce/blip2-opt-2.7b",
+    # [AUTO-DOWNLOAD] Ensure BLIP-2 is in local HF cache before local_files_only load.
+    ensure_hf_model("Salesforce/blip2-opt-2.7b")
+    model = Blip2Model.from_pretrained(
+        "Salesforce/blip2-opt-2.7b", local_files_only=True,
         quantization_config=BitsAndBytesConfig(load_in_4bit=True),
-        torch_dtype=torch.float16,
+        dtype=torch.float16,
         device_map="auto"
     )
     model.eval()
@@ -57,12 +61,18 @@ def _auto_extract_features(split: str):
     
     target_dataset = train_dataset if split == "train" else test_dataset
     
+    # [FIX] Caption.py explicitly truncates validation to 300 images for fast debugging.
+    # We must bypass this limit here so the cache contains the full 5000 validation images.
+    if split == "val" and hasattr(target_dataset, "coco"):
+        target_dataset.ids = list(sorted(target_dataset.coco.imgs.keys()))
+        print(f"[CACHE-AUTO] Bypassed validation limit. Full dataset size restored to {len(target_dataset.ids)}.")
+    
     def _collate(batch):
         images = torch.stack([item[0] for item in batch])
         labels = [item[1] for item in batch]
         return images, labels
         
-    loader = DataLoader(target_dataset, batch_size=32, num_workers=4, shuffle=False, collate_fn=_collate)
+    loader = DataLoader(target_dataset, batch_size=32, num_workers=0, shuffle=False, collate_fn=_collate)
     features_list = []
     labels_list = []
     
@@ -70,7 +80,16 @@ def _auto_extract_features(split: str):
     with torch.no_grad():
         for i, (images, labels) in enumerate(tqdm(loader)):
             images = images.to(device)
-            feats = model.get_qformer_features(pixel_values=images).last_hidden_state
+            # Safely handle different Transformers versions (ModelOutput object vs Tensor)
+            # Transformers <4.59 returns ModelOutput with .last_hidden_state
+            # Transformers >=4.59 may return a Tensor directly
+            raw = model.get_qformer_features(pixel_values=images)
+            if hasattr(raw, 'last_hidden_state'):
+                feats = raw.last_hidden_state
+            elif isinstance(raw, tuple):
+                feats = raw[0]
+            else:
+                feats = raw  # Already a tensor
             # CRITICAL: Must save as float16 CPU — _load_shared_cache strictly validates this
             features_list.append(feats.cpu().to(torch.float16))
             labels_list.extend(labels)
@@ -216,12 +235,13 @@ def get_collate_fn():
     def collate_fn(batch):
         nonlocal tokenizer
         if tokenizer is None:
-            from transformers import BitsAndBytesConfig, GPT2Tokenizer
-            import os
+            from transformers import GPT2Tokenizer
             os.environ["TOKENIZERS_PARALLELISM"] = "false"
-            
-            _tok_dir = os.path.join(os.path.dirname(__file__), "gpt2_tokenizer")
-            tokenizer = GPT2Tokenizer.from_pretrained(_tok_dir, local_files_only=True)
+
+            # [AUTO-DOWNLOAD + UNIFIED] Ensure GPT2 is cached, then load tokenizer
+            # from the same HF cache as the model (one source of truth).
+            ensure_hf_model("gpt2")
+            tokenizer = GPT2Tokenizer.from_pretrained("gpt2", local_files_only=True)
             tokenizer.pad_token = tokenizer.eos_token
         features = torch.stack([item[0] for item in batch], dim=0)
         raw_captions = [item[1] if isinstance(item[1], (list, tuple)) else [item[1]] for item in batch]

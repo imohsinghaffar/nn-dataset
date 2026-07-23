@@ -6,6 +6,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 from filelock import FileLock, Timeout
+
+# Disable Xet before importing huggingface_hub because it caused
+# xet-read-token 404 errors on clean-machine downloads.
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
+
 from huggingface_hub import HfApi, hf_hub_download
 
 # =============================================================================
@@ -50,15 +55,11 @@ def _is_rate_limit(error: Exception) -> bool:
 
 
 def _is_local_cache_miss(error: Exception) -> bool:
-    if isinstance(error, (FileNotFoundError, OSError)):
-        message = str(error).lower()
-        cache_miss_markers = (
-            "not found", "cannot find", "couldn't find", "could not find",
-            "local cache", "local_files_only", "offline mode",
-            "does not appear to have a file", "configuration file", "no such file",
-        )
-        return any(marker in message for marker in cache_miss_markers)
-    return False
+    # Transformers throws all kinds of obscure errors (AttributeError, ValueError, OSError)
+    # across different versions when local_files_only=True fails.
+    # The simplest, most robust solution is to treat ANY error during local-only 
+    # loading as a cache miss, forcing a fallback to online download.
+    return True
 
 
 def _safe_resource_name(value: str) -> str:
@@ -152,53 +153,20 @@ def from_pretrained_with_retry(loader: Callable[..., Any], *args: Any, **kwargs:
     if not args:
         raise ValueError("Requires model ID or local path as first argument.")
 
-    model_id_or_path = str(args[0])
-    online_kwargs = _add_token(kwargs)
+    # Ensure the model is downloaded via the robust snapshot_download path.
+    # Newer transformers can crash (AttributeError: 'NoneType' object has no
+    # attribute 'endswith') when from_pretrained itself performs the download,
+    # so we pre-fetch with huggingface_hub and then load locally.
+    # CRITICAL FIX: use the returned local_path (actual snapshot dir on disk),
+    # NOT the original repo_id string. Passing the repo_id with local_files_only=True
+    # fails when HF_HOME is non-default (e.g., cluster/professor machines).
+    from ab.nn.util.hf.download_utils import ensure_hf_model
+    local_path = ensure_hf_model(str(args[0]))
 
-    local_kwargs = dict(online_kwargs)
+    local_kwargs = dict(kwargs)
     local_kwargs["local_files_only"] = True
 
-    try:
-        return loader(*args, **local_kwargs)
-    except Exception as error:
-        if not _is_local_cache_miss(error):
-            raise
-
-    if _offline_mode_enabled():
-        raise FileNotFoundError(f"Model '{model_id_or_path}' not available offline.")
-
-    loader_name = getattr(loader, "__qualname__", repr(loader))
-    # Loader agnostic lock to prevent tokenizer and model fetching same repo concurrently online
-    resource_name = f"model_{model_id_or_path}"
-    lock_path = _get_lock_path(resource_name)
-
-    try:
-        with FileLock(str(lock_path), timeout=_LOCK_TIMEOUT):
-            try:
-                return loader(*args, **local_kwargs)
-            except Exception as error:
-                if not _is_local_cache_miss(error):
-                    raise
-
-            for attempt in range(1, _DOWNLOAD_MAX_RETRIES + 2):
-                try:
-                    return loader(*args, **online_kwargs)
-                except Exception as error:
-                    retries_used = attempt - 1
-                    if not _is_rate_limit(error) or retries_used >= _DOWNLOAD_MAX_RETRIES:
-                        raise
-
-                    sleep_time = _retry_sleep_time(attempt)
-                    print(f"\n[WARN] from_pretrained rate limit (429) hit! "
-                          f"Loader: {loader_name}\n"
-                          f"Sleeping {sleep_time}s "
-                          f"(retry {attempt}/{_DOWNLOAD_MAX_RETRIES})...")
-                    time.sleep(sleep_time)
-
-    except Timeout as error:
-        raise TimeoutError(f"Timed out waiting for lock: {lock_path}") from error
-
-    raise RuntimeError(f"Unexpected from_pretrained failure for '{model_id_or_path}'.")
+    return loader(local_path, *args[1:], **local_kwargs)
 
 
 # =============================================================================
