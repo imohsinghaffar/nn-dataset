@@ -58,7 +58,10 @@ def order_configs(configs, random_config_order):
 
 
 def conf_to_names(c: str) -> tuple[str, ...]:
-    return tuple(c.split(config_splitter))
+    # A full configuration has four fields. Model identities may include the
+    # separator (for example ``Blip2Cached_ShardAware``), so preserve everything
+    # after the first three separators as the model name.
+    return tuple(c.split(config_splitter, 3))
 
 
 def add_categorical_if_absent(trial, prms, nm, fn, default=None):
@@ -455,4 +458,3 @@ def sample_system():
         "cpu_percent": psutil.cpu_percent(interval=None),
         "process_rss_bytes": mem
     }
-
