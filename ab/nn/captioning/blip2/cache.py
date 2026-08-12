@@ -12,7 +12,41 @@ from typing import Any
 import torch
 from torch.utils.data import Dataset
 
-from .contract import FEATURE_SHAPE, CacheError, read_manifest, resolve_cache_dir, sha256_file
+from .contract import (
+    FEATURE_SHAPE, MANIFEST_NAME, CacheError, read_manifest, resolve_cache_dir, sha256_file,
+)
+
+
+def _split_needs_full_build(manifest: dict, split: str) -> bool:
+    """True if a split is absent, still mid-build, or was extracted with --limit.
+
+    A --limit build (e.g. the README's 16-image smoke cache) sets
+    ``complete: true`` for that limited size, so ``complete`` alone can't
+    detect it; ``limited`` is the flag ``build_blip2_cached.build()`` sets for
+    exactly this case.
+    """
+    record = manifest.get("splits", {}).get(split)
+    if not isinstance(record, dict):
+        return True
+    return not record.get("complete") or bool(record.get("limited"))
+
+
+def _auto_build_split(cache_dir: Path, split: str) -> None:
+    """Extract the full split in-process, resuming any partial/smoke shards.
+
+    Runs once per machine per split; every later call sees a complete,
+    unlimited manifest and returns immediately without importing this.
+    """
+    from ab.nn.util.Const import data_dir
+    from ab.nn.tools.build_blip2_cached import build as build_cache_split
+
+    coco_root = data_dir / "coco"
+    print(
+        f"[BLIP-2 cache] '{split}' split under {cache_dir} is missing, partial, or a "
+        f"limited smoke build — auto-extracting the full COCO {split} split from "
+        f"{coco_root} now. This runs once per machine and can take a while."
+    )
+    build_cache_split(coco_root, cache_dir, split, batch_size=1, shard_size=256, limit=None)
 
 
 class CachedCaptionDataset(Dataset):
@@ -20,7 +54,19 @@ class CachedCaptionDataset(Dataset):
         if split not in {"train", "val"}:
             raise ValueError("split must be 'train' or 'val'")
         self.cache_dir = resolve_cache_dir(cache_dir)
+
+        # Fresh machine: no cache at all yet. Safe to build from scratch.
+        if not (self.cache_dir / MANIFEST_NAME).is_file():
+            _auto_build_split(self.cache_dir, split)
+
+        # An existing manifest with the wrong contract (model/revision/shape)
+        # still fails loudly here — never silently rebuilt over.
         manifest = read_manifest(self.cache_dir)
+
+        if _split_needs_full_build(manifest, split):
+            _auto_build_split(self.cache_dir, split)
+            manifest = read_manifest(self.cache_dir)
+
         record = manifest.get("splits", {}).get(split)
         if not isinstance(record, dict) or not record.get("complete"):
             raise CacheError(f"BLIP-2 cache split {split!r} is not complete.")

@@ -3,10 +3,10 @@ import unittest
 import torch
 import torch.nn as nn
 
-from ab.nn.nn.Blip2Cached_MultiReference import Net
+from ab.nn.nn.Blip2FastOpt import Net
 
 
-class TestBlip2CachedMultiReference(unittest.TestCase):
+class TestBlip2FastOpt(unittest.TestCase):
     @staticmethod
     def model(seed=42):
         model = Net.__new__(Net)
@@ -21,13 +21,13 @@ class TestBlip2CachedMultiReference(unittest.TestCase):
 
         self.assertEqual(
             conf_to_names(
-                "img-captioning_coco_bleu,meteor,cider_Blip2Cached_MultiReference"
+                "img-captioning_coco_bleu,meteor,cider_Blip2FastOpt"
             ),
             (
                 "img-captioning",
                 "coco",
                 "bleu,meteor,cider",
-                "Blip2Cached_MultiReference",
+                "Blip2FastOpt",
             ),
         )
 
@@ -72,7 +72,7 @@ class TestBlip2CachedMultiReference(unittest.TestCase):
         ))
 
     def test_transform_reuses_verified_cache_contract(self):
-        from ab.nn.transform.blip2_cached_multi_reference import get_vocab_size
+        from ab.nn.transform.blip2_fast_opt import get_vocab_size
 
         self.assertEqual(get_vocab_size(), (50272,))
 

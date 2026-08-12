@@ -3,10 +3,10 @@ import unittest
 import torch
 import torch.nn as nn
 
-from ab.nn.nn.Blip2FastGPT2_MultiReference import Net
+from ab.nn.nn.Blip2Fast import Net
 
 
-class TestBlip2FastGPT2MultiReference(unittest.TestCase):
+class TestBlip2Fast(unittest.TestCase):
     @staticmethod
     def model(seed=42):
         model = Net.__new__(Net)
@@ -19,8 +19,8 @@ class TestBlip2FastGPT2MultiReference(unittest.TestCase):
         from ab.nn.util.Util import conf_to_names
 
         self.assertEqual(
-            conf_to_names("img-captioning_coco_bleu,meteor,cider_Blip2FastGPT2_MultiReference"),
-            ("img-captioning", "coco", "bleu,meteor,cider", "Blip2FastGPT2_MultiReference"),
+            conf_to_names("img-captioning_coco_bleu,meteor,cider_Blip2Fast"),
+            ("img-captioning", "coco", "bleu,meteor,cider", "Blip2Fast"),
         )
 
     def test_projection_has_normalized_nonlinear_bridge(self):
@@ -47,7 +47,7 @@ class TestBlip2FastGPT2MultiReference(unittest.TestCase):
         self.assertTrue(torch.equal(Net._caption_targets(ids, mask, 2), expected))
 
     def test_transform_reports_gpt2_vocabulary(self):
-        from ab.nn.transform.blip2_fast_gpt2_multi_reference import get_vocab_size
+        from ab.nn.transform.blip2_fast import get_vocab_size
 
         self.assertEqual(get_vocab_size(), (50257,))
 
